@@ -45,6 +45,11 @@ export class AppController {
     return this.attendanceService.syncSelectedRecords(body.ids);
   }
 
+  @Post('sync-all')
+  async syncAllRecords() {
+    return this.attendanceService.syncAllRecords();
+  }
+
   @Get('stats')
   async getStats() {
     return this.attendanceService.getRecordStats();

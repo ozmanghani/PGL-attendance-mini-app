@@ -56,7 +56,6 @@ export default function Home() {
   const [limit] = useState(15);
   const [filter, setFilter] = useState("all");
   const [totalPages, setTotalPages] = useState(0);
-  const [selectedRows, setSelectedRows] = useState<number[]>([]);
   const [socket, setSocket] = useState<Socket | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [stats, setStats] = useState({ total: 0, synced: 0, unsynced: 0 });
@@ -141,54 +140,8 @@ export default function Home() {
 
   const syncAll = async () => {
     try {
-      const response = await axios.get("http://localhost:4001/unsynced-ids");
-      const { ids, count } = response.data;
-
-      if (ids.length === 0) {
-        addToast("No unsynced records found", "info");
-        return;
-      }
-
-      await axios.post("http://localhost:4001/sync", { ids });
-      addToast(
-        `Sync initiated for all ${count} unsynced records across all pages`,
-        "success"
-      );
-    } catch (error) {
-      console.error("Error syncing:", error);
-      addToast("Error initiating sync. Please try again.", "error");
-    }
-  };
-
-  const syncSelected = async () => {
-    if (selectedRows.length === 0) return;
-
-    const selectedRecords = data.filter((record) =>
-      selectedRows.includes(record.id)
-    );
-    const alreadySyncedRecords = selectedRecords.filter(
-      (record) => record.isSynced
-    );
-    const unsyncedRecords = selectedRecords.filter(
-      (record) => !record.isSynced
-    );
-
-    if (unsyncedRecords.length === 0) {
-      addToast(
-        "All selected records are already synced. Nothing to sync.",
-        "info"
-      );
-      return;
-    }
-
-    try {
-      const unsyncedIds = unsyncedRecords.map((record) => record.id);
-      await axios.post("http://localhost:4001/sync", { ids: unsyncedIds });
-      addToast(
-        `Sync initiated for ${unsyncedRecords.length} unsynced records`,
-        "success"
-      );
-      setSelectedRows([]);
+      await axios.post("http://localhost:4001/sync-all");
+      addToast("Sync initiated for all unsynced records", "success");
     } catch (error) {
       console.error("Error syncing:", error);
       addToast("Error initiating sync. Please try again.", "error");
@@ -196,26 +149,6 @@ export default function Home() {
   };
 
   const columns: ColumnDef<AttendanceRecord>[] = [
-    {
-      id: "select",
-      header: ({ table }) => (
-        <Checkbox
-          checked={table.getIsAllPageRowsSelected()}
-          onCheckedChange={(value) => table.toggleAllPageRowsSelected(!!value)}
-          aria-label="Select all"
-        />
-      ),
-      cell: ({ row }) => (
-        <Checkbox
-          checked={row.getIsSelected()}
-          onCheckedChange={(value) => row.toggleSelected(!!value)}
-          aria-label="Select row"
-        />
-      ),
-      enableSorting: false,
-      enableHiding: false,
-      size: 60,
-    },
     {
       accessorKey: "id",
       header: "ID",
@@ -296,46 +229,18 @@ export default function Home() {
     getPaginationRowModel: getPaginationRowModel(),
     manualPagination: true,
     pageCount: totalPages,
-    enableRowSelection: true,
+    enableRowSelection: false,
     state: {
       pagination: {
         pageIndex: page - 1,
         pageSize: limit,
       },
-      rowSelection: selectedRows.reduce((acc, id) => {
-        const rowIndex = filteredData.findIndex((record) => record.id === id);
-        if (rowIndex !== -1) {
-          acc[rowIndex] = true;
-        }
-        return acc;
-      }, {} as Record<string, boolean>),
     },
     onPaginationChange: (updater) => {
       if (typeof updater === "function") {
         const newState = updater({ pageIndex: page - 1, pageSize: limit });
         setPage(newState.pageIndex + 1);
       }
-    },
-    onRowSelectionChange: (updater) => {
-      const currentSelection = selectedRows.reduce((acc, id) => {
-        const rowIndex = filteredData.findIndex((record) => record.id === id);
-        if (rowIndex !== -1) {
-          acc[rowIndex] = true;
-        }
-        return acc;
-      }, {} as Record<string, boolean>);
-
-      const newSelection =
-        typeof updater === "function" ? updater(currentSelection) : updater;
-
-      const newSelectedRows: number[] = [];
-      Object.entries(newSelection).forEach(([rowIndex, isSelected]) => {
-        if (isSelected && filteredData[parseInt(rowIndex)]) {
-          newSelectedRows.push(filteredData[parseInt(rowIndex)].id);
-        }
-      });
-
-      setSelectedRows(newSelectedRows);
     },
   });
 
@@ -455,34 +360,6 @@ export default function Home() {
               </div>
             </div>
           </div>
-
-          <div className="bg-white/80 dark:bg-slate-800/80 backdrop-blur-xl rounded-2xl p-6 shadow-xl border border-white/20">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-slate-600 dark:text-slate-400">
-                  Selected
-                </p>
-                <p className="text-3xl font-bold text-purple-600">
-                  {selectedRows.length}
-                </p>
-              </div>
-              <div className="w-12 h-12 bg-purple-500/10 rounded-xl flex items-center justify-center">
-                <svg
-                  className="w-6 h-6 text-purple-500"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M5 13l4 4L19 7"
-                  />
-                </svg>
-              </div>
-            </div>
-          </div>
         </div>
 
         {/* Controls Section */}
@@ -553,28 +430,6 @@ export default function Home() {
                   />
                 </svg>
                 Sync All Unsynced
-              </Button>
-
-              <Button
-                onClick={syncSelected}
-                disabled={selectedRows.length === 0}
-                variant="outline"
-                className="border-2 border-purple-500 text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-900/20 shadow-lg hover:shadow-xl transition-all duration-300"
-              >
-                <svg
-                  className="w-4 h-4 mr-2"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M5 13l4 4L19 7"
-                  />
-                </svg>
-                Sync Selected ({selectedRows.length})
               </Button>
             </div>
           </div>

@@ -7,6 +7,8 @@ export class AttendanceService {
   private readonly logger = new Logger(AttendanceService.name);
   private syncQueue: any[] = [];
   private failedQueue: any[] = [];
+  private batchCollector: any[] = [];
+  private batchTimeout: NodeJS.Timeout | null = null;
   private isProcessing = false;
   private isProcessingFailed = false;
 
@@ -19,30 +21,95 @@ export class AttendanceService {
   }
 
   async saveAttendance(rawData: string) {
-    this.logger.log(`Saving raw attendance: ${rawData}`);
-    const record = await this.prisma.rawAttendance.create({
-      data: { rawData, isSynced: false },
-    });
+    const lines = rawData
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
 
-    const parsedRecord = {
-      id: record.id,
-      ...this.parseRawData(record.rawData),
-      isSynced: record.isSynced,
-      createdAt: record.createdAt,
-      lastError: record.lastError,
-    };
+    const isBatch = lines.length > 1;
 
-    if (
-      !rawData.startsWith('OPLOG') &&
-      rawData.includes('\t') &&
-      parsedRecord.datetime !== '0'
-    ) {
-      this.attendanceGateway.emitNewRecord(parsedRecord);
-      this.attendanceGateway.emitStatsUpdate();
+    for (const line of lines) {
+      this.logger.log(`Saving raw attendance: ${line}`);
+      const record = await this.prisma.rawAttendance.create({
+        data: { rawData: line, isSynced: false },
+      });
+
+      const parsedRecord = {
+        id: record.id,
+        ...this.parseRawData(record.rawData),
+        isSynced: record.isSynced,
+        createdAt: record.createdAt,
+        lastError: record.lastError,
+      };
+
+      if (
+        !line.startsWith('OPLOG') &&
+        line.includes('\t') &&
+        parsedRecord.datetime !== '0'
+      ) {
+        this.attendanceGateway.emitNewRecord(parsedRecord);
+        this.attendanceGateway.emitStatsUpdate();
+      }
+
+      if (!isBatch) {
+        await this.syncAllRecords();
+        this.syncQueue.push({
+          id: record.id,
+          rawData: line,
+          retryCount: 0,
+        });
+      }
     }
 
-    this.syncQueue.push({ id: record.id, rawData, retryCount: 0 });
-    return record;
+    if (!isBatch) {
+      if (this.batchTimeout) {
+        clearTimeout(this.batchTimeout);
+      }
+
+      this.batchTimeout = setTimeout(() => this.processBatch(), 2000);
+    }
+
+    return { message: `Processed ${lines.length} records` };
+  }
+
+  private processBatch() {
+    if (this.batchCollector.length === 0) return;
+
+    const parsed = this.batchCollector.map((item) => ({
+      ...item,
+      parsed: this.parseRawData(item.rawData),
+    }));
+
+    const status0 = parsed
+      .filter((p) => p.parsed.status === '0')
+      .sort(
+        (a, b) =>
+          new Date(a.parsed.datetime).getTime() -
+          new Date(b.parsed.datetime).getTime(),
+      );
+
+    const status1 = parsed
+      .filter((p) => p.parsed.status === '1')
+      .sort(
+        (a, b) =>
+          new Date(a.parsed.datetime).getTime() -
+          new Date(b.parsed.datetime).getTime(),
+      );
+
+    const others = parsed
+      .filter((p) => p.parsed.status !== '0' && p.parsed.status !== '1')
+      .sort((a, b) => a.id - b.id);
+
+    const sorted = [...others, ...status0, ...status1].map((p) => ({
+      id: p.id,
+      rawData: p.rawData,
+      retryCount: p.retryCount,
+    }));
+
+    this.syncQueue.push(...sorted);
+
+    this.batchCollector = [];
+    this.batchTimeout = null;
   }
 
   private async startSyncProcess() {
@@ -60,6 +127,7 @@ export class AttendanceService {
   private async syncToHRMIS(item: any) {
     const hrmisUrl =
       process.env.HRMIS_URL || 'https://hrmis-api.pglsystem.com/iclock/cdata';
+    console.log('hrmisUrl:', hrmisUrl);
     const fullUrl = `${hrmisUrl}/iclock/cdata`;
     this.logger.log(
       `Syncing record ID ${item.id}, attempt ${item.retryCount + 1}`,
@@ -204,17 +272,79 @@ export class AttendanceService {
       where: { id: { in: ids }, isSynced: false },
     });
 
-    for (const record of records) {
-      this.syncQueue.push({
-        id: record.id,
-        rawData: record.rawData,
-        retryCount: 0,
-      });
+    const parsed = records.map((rec) => ({
+      id: rec.id,
+      rawData: rec.rawData,
+      retryCount: 0,
+      parsed: this.parseRawData(rec.rawData),
+    }));
+
+    const status0 = parsed
+      .filter((p) => p.parsed.status === '0')
+      .sort(
+        (a, b) =>
+          new Date(a.parsed.datetime).getTime() -
+          new Date(b.parsed.datetime).getTime(),
+      );
+
+    const status1 = parsed
+      .filter((p) => p.parsed.status === '1')
+      .sort(
+        (a, b) =>
+          new Date(a.parsed.datetime).getTime() -
+          new Date(b.parsed.datetime).getTime(),
+      );
+
+    const others = parsed
+      .filter((p) => p.parsed.status !== '0' && p.parsed.status !== '1')
+      .sort((a, b) => a.id - b.id);
+
+    const sortedItems = [...others, ...status0, ...status1].map((p) => ({
+      id: p.id,
+      rawData: p.rawData,
+      retryCount: p.retryCount,
+    }));
+
+    for (const item of sortedItems) {
+      this.syncQueue.push(item);
     }
 
     return {
       success: true,
       message: 'Sync initiated for selected records',
+    };
+  }
+
+  async syncAllRecords() {
+    const unsyncedRecords = await this.prisma.rawAttendance.findMany({
+      where: {
+        AND: [
+          { isSynced: false },
+          { rawData: { not: { startsWith: 'OPLOG' } } },
+          { rawData: { contains: '\t' } },
+        ],
+      },
+      select: { id: true, rawData: true },
+      orderBy: { id: 'asc' },
+    });
+
+    if (unsyncedRecords.length === 0) {
+      return { success: true, message: 'No unsynced records found' };
+    }
+
+    const sortedItems = unsyncedRecords.map((rec) => ({
+      id: rec.id,
+      rawData: rec.rawData,
+      retryCount: 0,
+    }));
+
+    for (const item of sortedItems) {
+      this.syncQueue.push(item);
+    }
+
+    return {
+      success: true,
+      message: `Sync initiated for ${unsyncedRecords.length} unsynced records`,
     };
   }
 
