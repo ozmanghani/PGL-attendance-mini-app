@@ -29,6 +29,7 @@ import {
 } from "@/components/ui/select";
 import { Input } from "../components/ui/input";
 import { ToastContainer, useToast } from "../components/ui/toast";
+import { SettingsDialog } from "../components/settings-dialog";
 
 interface AttendanceRecord {
   id: number;
@@ -49,6 +50,9 @@ interface ApiResponse {
   totalPages: number;
 }
 
+const API_BASE =
+  typeof window !== "undefined" ? window.location.origin : "";
+
 export default function Home() {
   const [data, setData] = useState<AttendanceRecord[]>([]);
   const [loading, setLoading] = useState(false);
@@ -59,6 +63,7 @@ export default function Home() {
   const [socket, setSocket] = useState<Socket | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [stats, setStats] = useState({ total: 0, synced: 0, unsynced: 0 });
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const { toasts, addToast, removeToast } = useToast();
 
   const filteredData = data.filter(
@@ -73,7 +78,7 @@ export default function Home() {
     setLoading(true);
     try {
       const response = await axios.get<ApiResponse>(
-        `http://localhost:4001/attendance?page=${page}&limit=${limit}&filter=${filter}`
+        `${API_BASE}/attendance?page=${page}&limit=${limit}&filter=${filter}`
       );
       setData(response.data.data);
       setTotalPages(response.data.totalPages);
@@ -85,7 +90,7 @@ export default function Home() {
 
   const fetchStats = async () => {
     try {
-      const response = await axios.get("http://localhost:4001/stats");
+      const response = await axios.get(`${API_BASE}/stats`);
       setStats(response.data);
     } catch (error) {
       console.error("Error fetching stats:", error);
@@ -102,7 +107,7 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    const newSocket = io("http://localhost:4001");
+    const newSocket = io(API_BASE);
     setSocket(newSocket);
 
     newSocket.on("syncUpdate", (update: { id: number; isSynced: boolean }) => {
@@ -140,7 +145,7 @@ export default function Home() {
 
   const syncAll = async () => {
     try {
-      await axios.post("http://localhost:4001/sync-all");
+      await axios.post(`${API_BASE}/sync-all`);
       addToast("Sync initiated for all unsynced records", "success");
     } catch (error) {
       console.error("Error syncing:", error);
@@ -253,6 +258,22 @@ export default function Home() {
       </div>
 
       <div className="relative z-10 container mx-auto px-6 py-8">
+        {/* Top bar — settings button */}
+        <div className="flex justify-end mb-2">
+          <button
+            onClick={() => setSettingsOpen(true)}
+            aria-label="Settings"
+            title="Settings"
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white/80 dark:bg-slate-800/80 backdrop-blur-xl border border-white/20 shadow-md hover:shadow-lg transition-all duration-200 text-slate-700 dark:text-slate-200 hover:scale-105"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+            <span className="text-sm font-medium">Settings</span>
+          </button>
+        </div>
+
         {/* Header Section */}
         <div className="text-center mb-12">
           <div className="inline-flex items-center justify-center w-20 h-20 bg-gradient-to-br from-blue-500 to-purple-600 rounded-2xl mb-6 shadow-2xl">
@@ -640,6 +661,25 @@ export default function Home() {
 
       {/* Toast Notifications */}
       <ToastContainer toasts={toasts} removeToast={removeToast} />
+
+      <SettingsDialog
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        apiBase={API_BASE}
+        onSaved={(next, portChanged) => {
+          if (portChanged) {
+            addToast(
+              `Settings saved. Port changing to ${next.port} — service is restarting, reload the page at the new URL.`,
+              "success",
+            );
+          } else {
+            addToast(
+              `HRMIS URL updated to ${next.hrmisUrl}. New syncs use this URL immediately.`,
+              "success",
+            );
+          }
+        }}
+      />
     </div>
   );
 }

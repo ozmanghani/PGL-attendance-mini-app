@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 import { AttendanceGateway } from './attendance.gateway';
+import { SettingsService } from './settings.service';
 
 @Injectable()
 export class AttendanceService {
@@ -15,6 +16,7 @@ export class AttendanceService {
   constructor(
     private prisma: PrismaClient,
     private attendanceGateway: AttendanceGateway,
+    private settings: SettingsService,
   ) {
     this.startSyncProcess();
     this.startFailedRetryProcess();
@@ -25,7 +27,6 @@ export class AttendanceService {
       .split('\n')
       .map((line) => line.trim())
       .filter((line) => line.length > 0);
-
     const isBatch = lines.length > 1;
 
     for (const line of lines) {
@@ -33,7 +34,6 @@ export class AttendanceService {
       const record = await this.prisma.rawAttendance.create({
         data: { rawData: line, isSynced: false },
       });
-
       const parsedRecord = {
         id: record.id,
         ...this.parseRawData(record.rawData),
@@ -41,7 +41,6 @@ export class AttendanceService {
         createdAt: record.createdAt,
         lastError: record.lastError,
       };
-
       if (
         !line.startsWith('OPLOG') &&
         line.includes('\t') &&
@@ -50,36 +49,32 @@ export class AttendanceService {
         this.attendanceGateway.emitNewRecord(parsedRecord);
         this.attendanceGateway.emitStatsUpdate();
       }
-
-      if (!isBatch) {
-        await this.syncAllRecords();
-        this.syncQueue.push({
+      if (isBatch) {
+        this.batchCollector.push({
           id: record.id,
           rawData: line,
           retryCount: 0,
         });
+      } else {
+        await this.syncAllRecords();
       }
     }
 
-    if (!isBatch) {
+    if (isBatch) {
       if (this.batchTimeout) {
         clearTimeout(this.batchTimeout);
       }
-
       this.batchTimeout = setTimeout(() => this.processBatch(), 2000);
     }
-
     return { message: `Processed ${lines.length} records` };
   }
 
   private processBatch() {
     if (this.batchCollector.length === 0) return;
-
     const parsed = this.batchCollector.map((item) => ({
       ...item,
       parsed: this.parseRawData(item.rawData),
     }));
-
     const status0 = parsed
       .filter((p) => p.parsed.status === '0')
       .sort(
@@ -87,7 +82,6 @@ export class AttendanceService {
           new Date(a.parsed.datetime).getTime() -
           new Date(b.parsed.datetime).getTime(),
       );
-
     const status1 = parsed
       .filter((p) => p.parsed.status === '1')
       .sort(
@@ -95,19 +89,15 @@ export class AttendanceService {
           new Date(a.parsed.datetime).getTime() -
           new Date(b.parsed.datetime).getTime(),
       );
-
     const others = parsed
       .filter((p) => p.parsed.status !== '0' && p.parsed.status !== '1')
       .sort((a, b) => a.id - b.id);
-
     const sorted = [...others, ...status0, ...status1].map((p) => ({
       id: p.id,
       rawData: p.rawData,
       retryCount: p.retryCount,
     }));
-
     this.syncQueue.push(...sorted);
-
     this.batchCollector = [];
     this.batchTimeout = null;
   }
@@ -122,12 +112,9 @@ export class AttendanceService {
       }
     }, 1000);
   }
-  // https://hrmis-api.pglsystem.com/iclock/cdata
 
   private async syncToHRMIS(item: any) {
-    const hrmisUrl =
-      process.env.HRMIS_URL || 'https://hrmis-api.pglsystem.com/iclock/cdata';
-    console.log('hrmisUrl:', hrmisUrl);
+    const hrmisUrl = this.settings.hrmisUrl;
     const fullUrl = `${hrmisUrl}/iclock/cdata`;
     this.logger.log(
       `Syncing record ID ${item.id}, attempt ${item.retryCount + 1}`,
@@ -139,7 +126,6 @@ export class AttendanceService {
         body: item.rawData,
       });
       console.log(item.rawData);
-
       const text = await response.text();
       if (text === 'OK') {
         await this.prisma.rawAttendance.update({
@@ -195,13 +181,11 @@ export class AttendanceService {
         { rawData: { contains: '\t' } },
       ],
     };
-
     if (filter === 'synced') {
       where.AND.push({ isSynced: true });
     } else if (filter === 'unsynced') {
       where.AND.push({ isSynced: false });
     }
-
     const [records, total] = await Promise.all([
       this.prisma.rawAttendance.findMany({
         where,
@@ -211,7 +195,6 @@ export class AttendanceService {
       }),
       this.prisma.rawAttendance.count({ where }),
     ]);
-
     const parsedRecords = records
       .map((record) => ({
         id: record.id,
@@ -224,7 +207,6 @@ export class AttendanceService {
         (record) =>
           record.datetime !== '0' && !record.userId.startsWith('OPLOG'),
       );
-
     return {
       data: parsedRecords,
       total,
@@ -260,25 +242,21 @@ export class AttendanceService {
       },
       select: { id: true },
     });
-
     if (syncedRecords.length > 0) {
       return {
         success: false,
         message: `One or more records you are trying to sync are already synced. Please refresh the page and try again.`,
       };
     }
-
     const records = await this.prisma.rawAttendance.findMany({
       where: { id: { in: ids }, isSynced: false },
     });
-
     const parsed = records.map((rec) => ({
       id: rec.id,
       rawData: rec.rawData,
       retryCount: 0,
       parsed: this.parseRawData(rec.rawData),
     }));
-
     const status0 = parsed
       .filter((p) => p.parsed.status === '0')
       .sort(
@@ -286,7 +264,6 @@ export class AttendanceService {
           new Date(a.parsed.datetime).getTime() -
           new Date(b.parsed.datetime).getTime(),
       );
-
     const status1 = parsed
       .filter((p) => p.parsed.status === '1')
       .sort(
@@ -294,21 +271,17 @@ export class AttendanceService {
           new Date(a.parsed.datetime).getTime() -
           new Date(b.parsed.datetime).getTime(),
       );
-
     const others = parsed
       .filter((p) => p.parsed.status !== '0' && p.parsed.status !== '1')
       .sort((a, b) => a.id - b.id);
-
     const sortedItems = [...others, ...status0, ...status1].map((p) => ({
       id: p.id,
       rawData: p.rawData,
       retryCount: p.retryCount,
     }));
-
     for (const item of sortedItems) {
       this.syncQueue.push(item);
     }
-
     return {
       success: true,
       message: 'Sync initiated for selected records',
@@ -327,21 +300,17 @@ export class AttendanceService {
       select: { id: true, rawData: true },
       orderBy: { id: 'asc' },
     });
-
     if (unsyncedRecords.length === 0) {
       return { success: true, message: 'No unsynced records found' };
     }
-
     const sortedItems = unsyncedRecords.map((rec) => ({
       id: rec.id,
       rawData: rec.rawData,
       retryCount: 0,
     }));
-
     for (const item of sortedItems) {
       this.syncQueue.push(item);
     }
-
     return {
       success: true,
       message: `Sync initiated for ${unsyncedRecords.length} unsynced records`,
@@ -360,7 +329,6 @@ export class AttendanceService {
       select: { id: true },
       orderBy: { createdAt: 'desc' },
     });
-
     return {
       ids: unsyncedRecords.map((record) => record.id),
       count: unsyncedRecords.length,
@@ -374,7 +342,6 @@ export class AttendanceService {
         { rawData: { contains: '\t' } },
       ],
     };
-
     const [totalCount, syncedCount, unsyncedCount] = await Promise.all([
       this.prisma.rawAttendance.count({ where: whereFilter }),
       this.prisma.rawAttendance.count({
@@ -384,7 +351,6 @@ export class AttendanceService {
         where: { ...whereFilter, isSynced: false },
       }),
     ]);
-
     return {
       total: totalCount,
       synced: syncedCount,

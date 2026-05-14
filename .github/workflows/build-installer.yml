@@ -1,0 +1,110 @@
+name: Build Windows Installer
+
+on:
+  push:
+    tags:
+      - "v*" # e.g. v1.0.0, v1.2.3-beta
+  workflow_dispatch: # manual run from the Actions tab (no Release created)
+
+permissions:
+  contents: write # needed by softprops/action-gh-release
+
+env:
+  NODE_VERSION: "20.x"
+  DOTNET_VERSION: "8.0.x"
+  NODE_WIN_VERSION: "20.18.1"
+  NSSM_VERSION: "2.24"
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Set up .NET ${{ env.DOTNET_VERSION }} SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $iscc = Get-ChildItem -Path "C:\Program Files (x86)\Inno Setup 6","C:\Program Files\Inno Setup 6" -Filter ISCC.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $iscc) { throw "ISCC.exe not found after Inno Setup install" }
+          Write-Host "ISCC at: $($iscc.FullName)"
+
+      - name: Cache vendor downloads (node-win + nssm)
+        uses: actions/cache@v4
+        with:
+          path: windows-build/vendor
+          key: vendor-node${{ env.NODE_WIN_VERSION }}-nssm${{ env.NSSM_VERSION }}
+
+      - name: Derive version from tag (or commit SHA on manual runs)
+        id: ver
+        shell: pwsh
+        run: |
+          $ref = "${{ github.ref }}"
+          if ($ref -like 'refs/tags/v*') {
+            $v = $ref.Substring('refs/tags/v'.Length)
+          } else {
+            $sha = "${{ github.sha }}".Substring(0,7)
+            $v = "0.0.0-dev.$sha"
+          }
+          Write-Host "Building version $v"
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          .\windows-build\scripts\build.ps1 `
+            -Version '${{ steps.ver.outputs.version }}' `
+            -NodeWinVersion '${{ env.NODE_WIN_VERSION }}' `
+            -NssmVersion '${{ env.NSSM_VERSION }}'
+
+      - name: Create stable filename copy (latest)
+        shell: pwsh
+        run: |
+          $src = "windows-build\dist\PGL-Attendance-Setup-${{ steps.ver.outputs.version }}.exe"
+          $dst = "windows-build\dist\PGL-Attendance-Setup.exe"
+          if (-not (Test-Path $src)) { throw "missing $src" }
+          Copy-Item $src $dst -Force
+          $size = [math]::Round((Get-Item $src).Length / 1MB, 1)
+          Write-Host "Installer is $size MB"
+
+      - name: Compute SHA-256 checksums
+        shell: pwsh
+        run: |
+          $hashes = Get-ChildItem windows-build\dist\*.exe | ForEach-Object {
+            "$(((Get-FileHash $_.FullName -Algorithm SHA256).Hash).ToLower())  $($_.Name)"
+          }
+          $hashes | Out-File -Encoding ascii windows-build\dist\SHA256SUMS.txt
+          Get-Content windows-build\dist\SHA256SUMS.txt | Write-Host
+
+      - name: Upload artifact (always)
+        uses: actions/upload-artifact@v4
+        with:
+          name: pgl-attendance-installer-${{ steps.ver.outputs.version }}
+          path: |
+            windows-build/dist/*.exe
+            windows-build/dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Create / update GitHub Release (tagged builds only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: PGL Attendance ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            windows-build/dist/PGL-Attendance-Setup-${{ steps.ver.outputs.version }}.exe
+            windows-build/dist/PGL-Attendance-Setup.exe
+            windows-build/dist/SHA256SUMS.txt
